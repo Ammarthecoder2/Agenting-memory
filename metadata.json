@@ -1,0 +1,6 @@
+{
+  "name": "PantryMind - Persistent Memory & Zero-Waste Agent",
+  "description": "An intelligent grocery memory agent powered by MongoDB document modeling, TTL expiry indexing, vector search semantic recall, and live change streams to eliminate food waste.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
