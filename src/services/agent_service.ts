@@ -24,6 +24,8 @@ const ai = process.env.GEMINI_API_KEY
     })
   : null;
 
+import { estimateFoodShelfLife } from '../data/foodExpiryKnowledge';
+
 // Grocery knowledge base for default shelf-life and categories
 interface GroceryMetadata {
   category: MongoMemoryDocument['content']['category'];
@@ -31,68 +33,33 @@ interface GroceryMetadata {
   dietary_tags: string[];
 }
 
-const GROCERY_CATALOG: Record<string, GroceryMetadata> = {
-  spinach: { category: 'produce', shelf_life_days: 7, dietary_tags: ['vegan', 'vegetable', 'leafy_green'] },
-  lettuce: { category: 'produce', shelf_life_days: 6, dietary_tags: ['vegan', 'vegetable', 'leafy_green'] },
-  kale: { category: 'produce', shelf_life_days: 8, dietary_tags: ['vegan', 'vegetable', 'leafy_green'] },
-  egg: { category: 'dairy', shelf_life_days: 21, dietary_tags: ['non-vegan', 'vegetarian', 'egg', 'protein'] },
-  eggs: { category: 'dairy', shelf_life_days: 21, dietary_tags: ['non-vegan', 'vegetarian', 'egg', 'protein'] },
-  bread: { category: 'bakery', shelf_life_days: 10, dietary_tags: ['vegan', 'bakery', 'grain'] },
-  toast: { category: 'bakery', shelf_life_days: 10, dietary_tags: ['vegan', 'bakery', 'grain'] },
-  chicken: { category: 'protein', shelf_life_days: 3, dietary_tags: ['non-vegan', 'poultry', 'meat'] },
-  'chicken breast': { category: 'protein', shelf_life_days: 3, dietary_tags: ['non-vegan', 'poultry', 'meat'] },
-  milk: { category: 'dairy', shelf_life_days: 7, dietary_tags: ['non-vegan', 'vegetarian', 'dairy'] },
-  'fresh milk': { category: 'dairy', shelf_life_days: 7, dietary_tags: ['non-vegan', 'vegetarian', 'dairy'] },
-  cheese: { category: 'dairy', shelf_life_days: 14, dietary_tags: ['non-vegan', 'vegetarian', 'dairy'] },
-  beef: { category: 'protein', shelf_life_days: 4, dietary_tags: ['non-vegan', 'meat'] },
-  tofu: { category: 'protein', shelf_life_days: 10, dietary_tags: ['vegan', 'protein', 'plant_based'] },
-  tomato: { category: 'produce', shelf_life_days: 8, dietary_tags: ['vegan', 'vegetable'] },
-  tomatoes: { category: 'produce', shelf_life_days: 8, dietary_tags: ['vegan', 'vegetable'] },
-  banana: { category: 'produce', shelf_life_days: 6, dietary_tags: ['vegan', 'fruit'] },
-  apples: { category: 'produce', shelf_life_days: 21, dietary_tags: ['vegan', 'fruit'] },
-  pasta: { category: 'pantry', shelf_life_days: 180, dietary_tags: ['vegan', 'pantry', 'grain'] },
-};
-
-function parseGroceryItems(text: string): Array<{ name: string; qty: string; meta: GroceryMetadata }> {
+function parseGroceryItems(text: string): Array<{ name: string; qty: string; meta: GroceryMetadata; storageTip?: string; emoji?: string }> {
   // Strip conversational prefixes
-  let cleaned = text
-    .replace(/^(i\s+bought|bought|got|added|here\s+is\s+my\s+haul|groceries:?)\s+/i, '')
+  const cleaned = text
+    .replace(/^(i\s+bought|bought|got|added|here\s+is\s+my\s+haul|groceries:?|i\s+have|in\s+my\s+fridge:?)\s+/i, '')
     .trim();
 
   // Split by commas, 'and', newlines
   const rawParts = cleaned.split(/,|\band\b|\n/i).map(s => s.trim()).filter(Boolean);
-  const items: Array<{ name: string; qty: string; meta: GroceryMetadata }> = [];
+  const items: Array<{ name: string; qty: string; meta: GroceryMetadata; storageTip?: string; emoji?: string }> = [];
 
   for (const part of rawParts) {
-    const lower = part.toLowerCase();
-    let matchedMeta: GroceryMetadata = {
-      category: 'produce',
-      shelf_life_days: 7,
-      dietary_tags: ['vegetarian']
-    };
+    const cleanPart = part.replace(/^and\s+/i, '').trim();
+    if (!cleanPart) continue;
 
-    let matchedName = part;
-    for (const [key, meta] of Object.entries(GROCERY_CATALOG)) {
-      if (lower.includes(key)) {
-        matchedMeta = meta;
-        matchedName = part;
-        break;
-      }
-    }
-
-    // Default heuristics if not in catalog
-    if (lower.includes('chicken') || lower.includes('beef') || lower.includes('meat') || lower.includes('pork') || lower.includes('fish')) {
-      matchedMeta = { category: 'protein', shelf_life_days: 3, dietary_tags: ['non-vegan', 'meat'] };
-    } else if (lower.includes('milk') || lower.includes('cream') || lower.includes('cheese') || lower.includes('butter')) {
-      matchedMeta = { category: 'dairy', shelf_life_days: 7, dietary_tags: ['non-vegan', 'vegetarian', 'dairy'] };
-    } else if (lower.includes('spinach') || lower.includes('herb') || lower.includes('salad') || lower.includes('berry')) {
-      matchedMeta = { category: 'produce', shelf_life_days: 5, dietary_tags: ['vegan', 'vegetable'] };
-    }
+    const estimate = estimateFoodShelfLife(cleanPart);
+    const capitalized = cleanPart.charAt(0).toUpperCase() + cleanPart.slice(1);
 
     items.push({
-      name: matchedName,
+      name: capitalized,
       qty: '1 portion',
-      meta: matchedMeta
+      meta: {
+        category: estimate.category,
+        shelf_life_days: estimate.shelfLifeDays,
+        dietary_tags: estimate.dietaryTags
+      },
+      storageTip: estimate.storageTip,
+      emoji: estimate.emoji
     });
   }
 
@@ -255,13 +222,20 @@ export class AgentService {
       };
     }
 
-    // 3. Check if user is logging bought groceries (e.g. "Eggs, spinach, bread" or "Bought eggs, spinach, bread")
+    // 3. Check if user is logging bought groceries (e.g. "Eggs, spinach, bread" or "Bought strawberries, avocados, salmon")
     const looksLikeGroceryHaul = 
       lower.includes('bought') || 
-      lower.includes('eggs, spinach') || 
-      lower.includes('spinach, bread') || 
+      lower.includes('got ') || 
+      lower.includes('added ') || 
       lower.includes('groceries') ||
-      (lower.includes(',') && (lower.includes('spinach') || lower.includes('bread') || lower.includes('milk') || lower.includes('eggs')));
+      lower.startsWith('i have ') ||
+      (lower.includes(',') && (
+        lower.includes('spinach') || lower.includes('bread') || lower.includes('milk') || 
+        lower.includes('eggs') || lower.includes('strawberry') || lower.includes('strawberries') ||
+        lower.includes('banana') || lower.includes('avocado') || lower.includes('chicken') ||
+        lower.includes('salmon') || lower.includes('beef') || lower.includes('yogurt') ||
+        lower.includes('apple') || lower.includes('carrot') || lower.includes('cheese')
+      ));
 
     if (looksLikeGroceryHaul) {
       const parsed = parseGroceryItems(messageText);
@@ -282,7 +256,7 @@ export class AgentService {
             shelf_life_days: item.meta.shelf_life_days,
             dietary_tags: item.meta.dietary_tags,
             is_perishable: true,
-            notes: `Added from SMS casual haul`
+            notes: item.storageTip || 'Added from SMS casual haul'
           },
           timestamps: {
             createdAt: addedDate.toISOString(),
@@ -300,14 +274,14 @@ export class AgentService {
       }
 
       const itemSummary = insertedDocs.map(d => 
-        `• **${d.content.item_name}** (Shelf life: ${d.content.shelf_life_days} days, TTL target: \`${new Date(d.lifecycle.ttl_index_expires_at).toLocaleDateString()}\`)`
+        `• **${d.content.item_name}** (~${d.content.shelf_life_days} days shelf life · Target TTL: \`${new Date(d.lifecycle.ttl_index_expires_at).toLocaleDateString()}\` · Category: *${d.content.category}*)`
       ).join('\n');
 
       return {
         id: generateObjectId(),
         sender: 'agent',
-        text: `Got your grocery haul! 🛒 I've committed **${insertedDocs.length} items** to your persistent MongoDB collection with active TTL expiry timers:\n\n${itemSummary}\n\n` +
-              `I'll track these automatically. Highly perishable items like **Spinach** will be prioritized first when you're hungry, and will auto-expire after 7 days if unused!`,
+        text: `Got your grocery haul! 🛒 I've memorized and automatically approximated the shelf life for **${insertedDocs.length} items**, logging them into your persistent MongoDB inventory:\n\n${itemSummary}\n\n` +
+              `I will continuously track these countdowns so nothing spoils. Whenever items near expiration, I'll alert you with popups and prioritize them in recipes!`,
         timestamp: now.toISOString(),
       };
     }

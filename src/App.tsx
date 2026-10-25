@@ -10,6 +10,7 @@ import { ChatInterface } from './components/ChatInterface';
 import { MemoryInspector } from './components/MemoryInspector';
 import { ExpirationAlertBanner } from './components/ExpirationAlertBanner';
 import { ExpiryAlertTray } from './components/ExpiryAlertTray';
+import { ExpirationToast, ExpirationNotification } from './components/ExpirationToast';
 import { 
   MongoMemoryDocument, 
   AgentChatMessage, 
@@ -27,6 +28,7 @@ export default function App() {
   const [restrictedDocs, setRestrictedDocs] = useState<MongoMemoryDocument[]>([]);
   const [profileDoc, setProfileDoc] = useState<MongoMemoryDocument | undefined>();
   const [changeEvents, setChangeEvents] = useState<ChangeStreamEvent[]>([]);
+  const [toastNotifications, setToastNotifications] = useState<ExpirationNotification[]>([]);
   const [messages, setMessages] = useState<AgentChatMessage[]>([
     {
       id: 'init_welcome',
@@ -162,6 +164,70 @@ export default function App() {
     }
   };
 
+  // Trigger an in-app popup notification for an expiring item
+  const triggerExpirationToast = useCallback((item: {
+    itemId: string;
+    itemName: string;
+    quantity: string;
+    category?: string;
+    daysLeft: number;
+    expirationDate: string;
+    isCritical: boolean;
+  }) => {
+    const notifId = `notif_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    setToastNotifications((prev) => [
+      {
+        id: notifId,
+        itemId: item.itemId,
+        itemName: item.itemName,
+        quantity: item.quantity,
+        category: item.category,
+        daysLeft: item.daysLeft,
+        expirationDate: item.expirationDate,
+        isCritical: item.isCritical,
+        createdAt: Date.now()
+      },
+      ...prev.filter(n => n.itemId !== item.itemId)
+    ]);
+  }, []);
+
+  const dismissToastNotification = (id: string) => {
+    setToastNotifications((prev) => prev.filter((n) => n.id !== id));
+  };
+
+  const dismissAllToastNotifications = () => {
+    setToastNotifications([]);
+  };
+
+  // Trigger floating popups for all items currently nearing expiration
+  const triggerAllUrgentToasts = useCallback(() => {
+    if (expiringItems.length === 0) {
+      // If none currently expiring, provide positive feedback
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `sys_${Date.now()}`,
+          sender: 'system',
+          text: `✅ **All items are fresh!** No active ingredients currently require urgent rescue before MongoDB TTL index expiration.`,
+          timestamp: simulatedNow
+        }
+      ]);
+      return;
+    }
+
+    expiringItems.forEach(({ doc, daysLeft, isCritical }) => {
+      triggerExpirationToast({
+        itemId: doc._id,
+        itemName: doc.content.item_name || 'Ingredient',
+        quantity: doc.content.quantity || '1 portion',
+        category: doc.content.category,
+        daysLeft,
+        expirationDate: doc.lifecycle.ttl_index_expires_at,
+        isCritical
+      });
+    });
+  }, [expiringItems, simulatedNow, triggerExpirationToast]);
+
   // Advance time by X days (simulating TTL)
   const handleAdvanceDays = async (days: number) => {
     try {
@@ -186,27 +252,45 @@ export default function App() {
               timestamp: data.newSimulatedNow
             }
           ]);
-        } else {
-          // Check if any active items are now urgent (< 2.5 days left)
-          const newNowTime = new Date(data.newSimulatedNow).getTime();
-          const newlyUrgent = activeDocs.filter(d => {
-            const ttlTime = new Date(d.lifecycle.ttl_index_expires_at).getTime();
-            const daysLeft = (ttlTime - newNowTime) / (24 * 3600 * 1000);
-            return daysLeft > 0 && daysLeft <= 2.5;
+        }
+
+        // Check if any active items are now urgent (< 2.5 days left) and trigger popups!
+        const newNowTime = new Date(data.newSimulatedNow).getTime();
+        const urgentItems = activeDocs.map(d => {
+          const ttlTime = new Date(d.lifecycle.ttl_index_expires_at).getTime();
+          const daysLeft = Number(((ttlTime - newNowTime) / (24 * 3600 * 1000)).toFixed(1));
+          return {
+            doc: d,
+            daysLeft,
+            isCritical: daysLeft <= 1.5,
+            isUrgent: daysLeft > 0 && daysLeft <= 2.5
+          };
+        }).filter(i => i.isUrgent);
+
+        if (urgentItems.length > 0) {
+          // Trigger floating alert pop-up notifications for all urgent items!
+          urgentItems.forEach(({ doc, daysLeft, isCritical }) => {
+            triggerExpirationToast({
+              itemId: doc._id,
+              itemName: doc.content.item_name || 'Ingredient',
+              quantity: doc.content.quantity || '1 portion',
+              category: doc.content.category,
+              daysLeft,
+              expirationDate: doc.lifecycle.ttl_index_expires_at,
+              isCritical
+            });
           });
 
-          if (newlyUrgent.length > 0) {
-            const names = newlyUrgent.map(d => d.content.item_name).join(', ');
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: `sys_alert_${Date.now()}`,
-                sender: 'system',
-                text: `⚠️ **Expiration Warning:** ${names} is nearing its TTL expiration limit (< 2.5 days left)! Say *"I'm starving"* or click **Cook This** to rescue it before it perishes.`,
-                timestamp: data.newSimulatedNow
-              }
-            ]);
-          }
+          const names = urgentItems.map(d => d.doc.content.item_name).join(', ');
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `sys_alert_${Date.now()}`,
+              sender: 'system',
+              text: `⚠️ **Expiration Warning:** ${names} is nearing its TTL expiration limit (< 2.5 days left)! Say *"I'm starving"* or click **Cook This** to rescue it before it perishes.`,
+              timestamp: data.newSimulatedNow
+            }
+          ]);
         }
       }
     } catch (err) {
@@ -236,6 +320,7 @@ export default function App() {
         setCurrentStep(1);
         setSelectedRecallAudit(null);
         setInspectorTab('active');
+        setToastNotifications([]);
         refreshMemoryState();
         setMessages([
           {
@@ -258,6 +343,7 @@ export default function App() {
     category: any;
     shelfLifeDays: number;
     dietaryTags: string[];
+    expirationDate?: string;
   }) => {
     try {
       const res = await fetch('/api/memories/item', {
@@ -270,10 +356,54 @@ export default function App() {
         })
       });
       if (res.ok) {
+        const resData = await res.json();
         refreshMemoryState();
+
+        // If the item has a short shelf life, trigger an expiration popup immediately!
+        if (resData.item && (item.shelfLifeDays <= 2.5 || item.shelfLifeDays <= 3.0)) {
+          triggerExpirationToast({
+            itemId: resData.item._id,
+            itemName: resData.item.content.item_name,
+            quantity: resData.item.content.quantity,
+            category: resData.item.content.category,
+            daysLeft: resData.item.content.shelf_life_days,
+            expirationDate: resData.item.lifecycle.ttl_index_expires_at,
+            isCritical: resData.item.content.shelf_life_days <= 1.5
+          });
+        }
       }
     } catch (err) {
       console.error('Error adding item:', err);
+    }
+  };
+
+  // Update item expiration date / shelf life days
+  const handleUpdateItemExpiry = async (id: string, days: number, date?: string) => {
+    try {
+      const res = await fetch(`/api/memories/item/${id}/expiry`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ shelfLifeDays: days, expirationDate: date })
+      });
+      if (res.ok) {
+        const resData = await res.json();
+        refreshMemoryState();
+
+        // If the updated item is urgent, pop up a notification
+        if (days <= 2.5 && resData.item) {
+          triggerExpirationToast({
+            itemId: id,
+            itemName: resData.item.content.item_name || 'Item',
+            quantity: resData.item.content.quantity || '1 portion',
+            category: resData.item.content.category,
+            daysLeft: days,
+            expirationDate: resData.item.lifecycle.ttl_index_expires_at,
+            isCritical: days <= 1.5
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Error updating item expiry:', err);
     }
   };
 
@@ -286,6 +416,8 @@ export default function App() {
         body: JSON.stringify({ reason, status })
       });
       if (res.ok) {
+        // Dismiss any existing toast for this item
+        setToastNotifications(prev => prev.filter(n => n.itemId !== id));
         refreshMemoryState();
       }
     } catch (err) {
@@ -300,6 +432,7 @@ export default function App() {
         method: 'DELETE'
       });
       if (res.ok) {
+        setToastNotifications(prev => prev.filter(n => n.itemId !== id));
         refreshMemoryState();
       }
     } catch (err) {
@@ -420,6 +553,7 @@ export default function App() {
         onCookRecipe={handleCookRecipe}
         onCookAllUrgent={handleCookAllUrgent}
         onDiscardItem={handleDiscardItem}
+        onTriggerToasts={triggerAllUrgentToasts}
       />
 
       {/* Expiry Alert Center Tray Modal */}
@@ -430,6 +564,16 @@ export default function App() {
         onCookRecipe={handleCookRecipe}
         onCookAllUrgent={handleCookAllUrgent}
         onDiscardItem={handleDiscardItem}
+      />
+
+      {/* Live Floating Expiration Popups / Push Notifications */}
+      <ExpirationToast
+        notifications={toastNotifications}
+        onDismiss={dismissToastNotification}
+        onDismissAll={dismissAllToastNotifications}
+        onCookRecipe={handleCookRecipe}
+        onDiscardItem={handleDiscardItem}
+        onOpenAlertTray={() => setIsAlertTrayOpen(true)}
       />
 
       {/* Main 2-Column Split Workspace */}
@@ -466,6 +610,7 @@ export default function App() {
             activeTabKey={inspectorTab}
             onTabChange={setInspectorTab}
             onCookRecipe={handleCookRecipe}
+            onUpdateItemExpiry={handleUpdateItemExpiry}
           />
         </div>
       </main>

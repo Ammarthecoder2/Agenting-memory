@@ -7,7 +7,8 @@ import React, { useState } from 'react';
 import { 
   AlertTriangle, 
   Flame, 
-  Sparkles
+  Sparkles,
+  Bell
 } from 'lucide-react';
 import { MongoMemoryDocument } from '../types/memory';
 
@@ -21,6 +22,7 @@ interface ExpirationAlertBannerProps {
   onCookAllUrgent: () => void;
   onDiscardItem: (id: string, reason: string, status: 'perished' | 'consumed') => Promise<void>;
   onDismiss?: () => void;
+  onTriggerToasts?: () => void;
 }
 
 export const ExpirationAlertBanner: React.FC<ExpirationAlertBannerProps> = ({
@@ -28,7 +30,8 @@ export const ExpirationAlertBanner: React.FC<ExpirationAlertBannerProps> = ({
   onCookRecipe,
   onCookAllUrgent,
   onDiscardItem,
-  onDismiss
+  onDismiss,
+  onTriggerToasts
 }) => {
   const [isMinimized, setIsMinimized] = useState(false);
 
@@ -103,8 +106,19 @@ export const ExpirationAlertBanner: React.FC<ExpirationAlertBannerProps> = ({
           </div>
         )}
 
-        {/* Right: Master Rescue Action & Toggle */}
+        {/* Right: Master Rescue Action, Trigger Popups & Toggle */}
         <div className="flex items-center space-x-2">
+          {onTriggerToasts && (
+            <button
+              onClick={onTriggerToasts}
+              className="px-2.5 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-xs font-bold transition-all cursor-pointer flex items-center space-x-1.5 active:scale-95 shadow-sm"
+              title="Show live floating pop-up notifications for expiring food"
+            >
+              <Bell className="w-3.5 h-3.5 text-amber-400" />
+              <span>Show Pop-ups</span>
+            </button>
+          )}
+
           <button
             onClick={onCookAllUrgent}
             className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-white text-xs font-bold shadow-md shadow-emerald-950/50 transition-all cursor-pointer flex items-center space-x-1.5 active:scale-95 border border-emerald-400/30"

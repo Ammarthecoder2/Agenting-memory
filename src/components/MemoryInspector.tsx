@@ -22,7 +22,11 @@ import {
   AlertTriangle,
   FileCode,
   Filter,
-  Flame
+  Flame,
+  Calendar,
+  BookOpen,
+  Info,
+  Lightbulb
 } from 'lucide-react';
 import { 
   MongoMemoryDocument, 
@@ -30,6 +34,13 @@ import {
   VectorSearchResult, 
   MemoryRecallExplanation 
 } from '../types/memory';
+import {
+  estimateFoodShelfLife,
+  searchFoodSuggestions,
+  FOOD_EXPIRY_KNOWLEDGE_BASE,
+  FoodExpiryEstimate,
+  FoodExpiryRecord
+} from '../data/foodExpiryKnowledge';
 
 const QUICK_PRESETS = [
   { name: 'Fresh Spinach', emoji: '🥬', category: 'produce' as const, days: 7, tags: ['vegan', 'vegetarian'] },
@@ -85,7 +96,21 @@ interface MemoryInspectorProps {
   activeTabKey?: string;
   onTabChange?: (tabKey: string) => void;
   onCookRecipe?: (itemName: string) => void;
+  onUpdateItemExpiry?: (id: string, days: number, date?: string) => Promise<void>;
 }
+
+// Helpers for syncing days <-> dates
+const calculateDateFromDays = (days: number, baseIso: string) => {
+  const base = new Date(baseIso);
+  const target = new Date(base.getTime() + (Number(days) || 1) * 24 * 3600 * 1000);
+  return target.toISOString().split('T')[0];
+};
+
+const calculateDaysFromDate = (dateStr: string, baseIso: string) => {
+  const base = new Date(baseIso).getTime();
+  const target = new Date(dateStr).getTime();
+  return Math.max(1, Math.ceil((target - base) / (24 * 3600 * 1000)));
+};
 
 export const MemoryInspector: React.FC<MemoryInspectorProps> = ({
   activeDocuments,
@@ -103,7 +128,8 @@ export const MemoryInspector: React.FC<MemoryInspectorProps> = ({
   selectedRecallAudit,
   activeTabKey = 'active',
   onTabChange,
-  onCookRecipe
+  onCookRecipe,
+  onUpdateItemExpiry
 }) => {
   const [currentTab, setCurrentTab] = useState<'active' | 'background' | 'vector' | 'profile' | 'stream'>(
     (activeTabKey as any) || 'active'
@@ -120,11 +146,126 @@ export const MemoryInspector: React.FC<MemoryInspectorProps> = ({
   const [newItemQty, setNewItemQty] = useState('1 portion');
   const [newItemCategory, setNewItemCategory] = useState<'produce' | 'dairy' | 'protein' | 'bakery' | 'pantry' | 'beverage'>('produce');
   const [newItemShelfLife, setNewItemShelfLife] = useState(7);
+  const [newItemDate, setNewItemDate] = useState(() => calculateDateFromDays(7, simulatedNow));
   const [isVeganTag, setIsVeganTag] = useState(true);
   const [isVegetarianTag, setIsVegetarianTag] = useState(true);
   const [isDairyTag, setIsDairyTag] = useState(false);
   const [isMeatTag, setIsMeatTag] = useState(false);
   const [isSubmittingItem, setIsSubmittingItem] = useState(false);
+
+  // Auto-memorized food expiry state
+  const [detectedEstimate, setDetectedEstimate] = useState<FoodExpiryEstimate | null>(null);
+  const [suggestions, setSuggestions] = useState<FoodExpiryRecord[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [showDirectoryModal, setShowDirectoryModal] = useState(false);
+  const [directorySearch, setDirectorySearch] = useState('');
+  const [directoryFilter, setDirectoryFilter] = useState<'all' | 'produce' | 'dairy' | 'protein' | 'bakery' | 'pantry'>('all');
+
+  // Input change handler for Item Name with auto-detection of shelf life
+  const handleItemNameChange = (val: string) => {
+    setNewItemName(val);
+    if (!val.trim()) {
+      setSuggestions([]);
+      setShowSuggestions(false);
+      setDetectedEstimate(null);
+      return;
+    }
+
+    const matches = searchFoodSuggestions(val, 6);
+    setSuggestions(matches);
+    setShowSuggestions(matches.length > 0);
+
+    // Auto-detect expiry estimate from knowledge base
+    const estimate = estimateFoodShelfLife(val);
+    if (estimate.confidence !== 'default') {
+      setDetectedEstimate(estimate);
+      setNewItemShelfLife(estimate.shelfLifeDays);
+      setNewItemDate(calculateDateFromDays(estimate.shelfLifeDays, simulatedNow));
+      setNewItemCategory(estimate.category);
+
+      const isVegan = estimate.dietaryTags.includes('vegan');
+      const isVeg = estimate.dietaryTags.includes('vegetarian');
+      const isDairy = estimate.dietaryTags.includes('dairy');
+      const isMeat = estimate.dietaryTags.includes('meat') || estimate.dietaryTags.includes('seafood');
+
+      setIsVeganTag(isVegan);
+      setIsVegetarianTag(isVeg);
+      setIsDairyTag(isDairy);
+      setIsMeatTag(isMeat);
+    } else {
+      setDetectedEstimate(null);
+    }
+  };
+
+  const handleSelectSuggestion = (record: FoodExpiryRecord) => {
+    setNewItemName(record.name);
+    setNewItemShelfLife(record.shelfLifeDays);
+    setNewItemDate(calculateDateFromDays(record.shelfLifeDays, simulatedNow));
+    setNewItemCategory(record.category);
+    setShowSuggestions(false);
+
+    const isVegan = record.dietaryTags.includes('vegan');
+    const isVeg = record.dietaryTags.includes('vegetarian');
+    const isDairy = record.dietaryTags.includes('dairy');
+    const isMeat = record.dietaryTags.includes('meat') || record.dietaryTags.includes('seafood');
+
+    setIsVeganTag(isVegan);
+    setIsVegetarianTag(isVeg);
+    setIsDairyTag(isDairy);
+    setIsMeatTag(isMeat);
+
+    setDetectedEstimate({
+      matchedName: record.name,
+      category: record.category,
+      shelfLifeDays: record.shelfLifeDays,
+      dietaryTags: record.dietaryTags,
+      emoji: record.emoji,
+      confidence: 'exact',
+      storageTip: record.storageTip
+    });
+  };
+
+  // Card inline expiration date editor state
+  const [editingExpiryDocId, setEditingExpiryDocId] = useState<string | null>(null);
+  const [editExpiryDays, setEditExpiryDays] = useState<number>(7);
+  const [editExpiryDate, setEditExpiryDate] = useState<string>('');
+  const [isSavingExpiry, setIsSavingExpiry] = useState(false);
+
+  // Synchronize shelf life days -> date
+  const handleShelfLifeDaysChange = (days: number) => {
+    const safeDays = Math.max(1, days);
+    setNewItemShelfLife(safeDays);
+    setNewItemDate(calculateDateFromDays(safeDays, simulatedNow));
+  };
+
+  // Synchronize date -> shelf life days
+  const handleExpirationDateChange = (dateVal: string) => {
+    setNewItemDate(dateVal);
+    if (dateVal) {
+      const days = calculateDaysFromDate(dateVal, simulatedNow);
+      setNewItemShelfLife(days);
+    }
+  };
+
+  const handleStartEditExpiry = (doc: MongoMemoryDocument) => {
+    const totalDays = doc.content.shelf_life_days || 7;
+    setEditingExpiryDocId(doc._id);
+    setEditExpiryDays(totalDays);
+    setEditExpiryDate(new Date(doc.lifecycle.ttl_index_expires_at).toISOString().split('T')[0]);
+  };
+
+  const handleSaveCardExpiry = async (docId: string) => {
+    if (!onUpdateItemExpiry) return;
+    setIsSavingExpiry(true);
+    try {
+      await onUpdateItemExpiry(docId, editExpiryDays, editExpiryDate);
+      setEditingExpiryDocId(null);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSavingExpiry(false);
+    }
+  };
 
   const handleCreateItemSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -150,6 +291,7 @@ export const MemoryInspector: React.FC<MemoryInspectorProps> = ({
       setNewItemName('');
       setNewItemQty('1 portion');
       setNewItemShelfLife(7);
+      setNewItemDate(calculateDateFromDays(7, simulatedNow));
       setShowAddForm(false);
     } catch (err) {
       console.error(err);
@@ -337,7 +479,9 @@ export const MemoryInspector: React.FC<MemoryInspectorProps> = ({
                   <span className="text-base group-hover:scale-110 transition-transform">{p.emoji}</span>
                   <div className="text-left">
                     <span className="font-bold text-slate-100 block group-hover:text-emerald-300 transition-colors">{p.name}</span>
-                    <span className="text-[10px] text-slate-400 font-mono">TTL: {p.days}d</span>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      TTL: {p.days}d · {new Date(new Date(simulatedNow).getTime() + p.days * 86400000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                    </span>
                   </div>
                 </button>
               ))}
@@ -385,7 +529,7 @@ export const MemoryInspector: React.FC<MemoryInspectorProps> = ({
                   />
                 </div>
 
-                <div>
+                <div className="sm:col-span-2">
                   <label className="text-slate-400 font-medium block mb-1">Category</label>
                   <select
                     value={newItemCategory}
@@ -401,16 +545,62 @@ export const MemoryInspector: React.FC<MemoryInspectorProps> = ({
                   </select>
                 </div>
 
-                <div>
-                  <label className="text-slate-400 font-medium block mb-1">Shelf Life (Days) for TTL Expiry</label>
-                  <input
-                    type="number"
-                    min="1"
-                    max="180"
-                    value={newItemShelfLife}
-                    onChange={(e) => setNewItemShelfLife(parseInt(e.target.value, 10) || 7)}
-                    className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-emerald-500 text-xs font-mono"
-                  />
+                {/* Expiration Configuration: Days AND Date Option Side-by-Side */}
+                <div className="sm:col-span-2 p-3 rounded-2xl bg-slate-900/90 border border-slate-750 shadow-inner">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>When does this food go bad? (TTL Expiration)</span>
+                    </span>
+                    <span className="text-[11px] text-amber-300 font-mono bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/30 flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-amber-400" />
+                      <span>Expires {new Date(newItemDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* Days input */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-300 font-medium text-xs">Days until it goes bad</label>
+                        <span className="text-[10px] text-slate-500 font-mono">Days</span>
+                      </div>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          min="1"
+                          max="180"
+                          value={newItemShelfLife}
+                          onChange={(e) => handleShelfLifeDaysChange(parseInt(e.target.value, 10) || 1)}
+                          className="w-full bg-slate-950 border border-slate-700/90 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-emerald-500 text-xs font-mono pr-12"
+                        />
+                        <span className="absolute right-3 top-2 text-xs text-slate-500 font-mono pointer-events-none">days</span>
+                      </div>
+                    </div>
+
+                    {/* Date picker directly beside the days input */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-amber-300 font-semibold text-xs flex items-center space-x-1">
+                          <Calendar className="w-3 h-3 text-amber-400" />
+                          <span>Or Pick Expiration Date</span>
+                        </label>
+                        <span className="text-[10px] text-amber-400/80 font-mono">Calendar</span>
+                      </div>
+                      <input
+                        type="date"
+                        value={newItemDate}
+                        min={new Date(simulatedNow).toISOString().split('T')[0]}
+                        onChange={(e) => handleExpirationDateChange(e.target.value)}
+                        className="w-full bg-slate-950 border border-amber-500/40 focus:border-amber-400 rounded-xl px-3 py-2 text-amber-200 focus:outline-none text-xs font-mono [color-scheme:dark] cursor-pointer"
+                      />
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 mt-2 flex items-center gap-1.5">
+                    <span>💡</span>
+                    <span>Set either days or pick an exact calendar date beside it. Both options stay synced for MongoDB TTL auto-purge.</span>
+                  </p>
                 </div>
               </div>
 
@@ -568,21 +758,42 @@ export const MemoryInspector: React.FC<MemoryInspectorProps> = ({
                         </div>
 
                         {/* Freshness & TTL Progress Bar */}
-                        <div className="space-y-1 pt-0.5 max-w-lg">
+                        <div className="space-y-1.5 pt-0.5 max-w-lg">
                           <div className="flex items-center justify-between text-xs">
-                            <span
-                              className={`font-bold flex items-center space-x-1.5 ${
-                                isCritical ? 'text-rose-400' : isUrgent ? 'text-amber-400' : 'text-emerald-400'
-                              }`}
+                            <div className="flex items-center flex-wrap gap-2">
+                              <span
+                                className={`font-bold flex items-center space-x-1.5 ${
+                                  isCritical ? 'text-rose-400' : isUrgent ? 'text-amber-400' : 'text-emerald-400'
+                                }`}
+                              >
+                                {(isCritical || isUrgent) && (
+                                  <AlertTriangle className={`w-3.5 h-3.5 ${isCritical ? 'text-rose-400' : 'text-amber-400'} animate-pulse`} />
+                                )}
+                                <span>{daysLeft <= 0 ? '⚠️ Expired / Expiring Today' : `${daysLeft} days remaining`}</span>
+                              </span>
+
+                              {/* Small option / badge showing exact date right beside days */}
+                              <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-lg bg-slate-900 border border-slate-750 text-slate-300 text-[11px] font-mono shadow-inner" title="Exact expiration date">
+                                <Calendar className="w-3 h-3 text-amber-400" />
+                                <span>Exp: {new Date(doc.lifecycle.ttl_index_expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span>
+                              </span>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (editingExpiryDocId === doc._id) {
+                                  setEditingExpiryDocId(null);
+                                } else {
+                                  handleStartEditExpiry(doc);
+                                }
+                              }}
+                              className="text-[11px] text-amber-300/90 hover:text-amber-200 hover:bg-amber-500/10 px-2 py-0.5 rounded-md transition-all cursor-pointer flex items-center space-x-1 border border-amber-500/20 active:scale-95"
+                              title="Edit expiration date or days"
                             >
-                              {(isCritical || isUrgent) && (
-                                <AlertTriangle className={`w-3.5 h-3.5 ${isCritical ? 'text-rose-400' : 'text-amber-400'} animate-pulse`} />
-                              )}
-                              <span>{daysLeft <= 0 ? '⚠️ Expired / Expiring Today' : `${daysLeft} days remaining`}</span>
-                            </span>
-                            <span className="text-slate-500 text-[11px] font-mono">
-                              Expiry: {new Date(doc.lifecycle.ttl_index_expires_at).toLocaleDateString()}
-                            </span>
+                              <Calendar className="w-3 h-3 text-amber-400" />
+                              <span>{editingExpiryDocId === doc._id ? 'Close' : 'Edit Date'}</span>
+                            </button>
                           </div>
 
                           {/* Visual Freshness Bar */}
@@ -598,6 +809,98 @@ export const MemoryInspector: React.FC<MemoryInspectorProps> = ({
                               style={{ width: `${percentElapsed}%` }}
                             />
                           </div>
+
+                          {/* Inline Expiration Date & Days Editor */}
+                          {editingExpiryDocId === doc._id && (
+                            <div className="p-3 mt-2 rounded-xl bg-slate-900/95 border border-amber-500/40 space-y-2 animate-in fade-in duration-200 shadow-lg">
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="font-bold text-amber-300 flex items-center gap-1">
+                                  <Calendar className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>Update Expiration (Days or Date)</span>
+                                </span>
+                                <span className="text-[10px] text-slate-400 font-mono">Syncs to TTL Index</span>
+                              </div>
+
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                                <div>
+                                  <label className="text-slate-400 text-[11px] block mb-0.5">Days remaining</label>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    max="180"
+                                    value={editExpiryDays}
+                                    onChange={(e) => {
+                                      const d = parseInt(e.target.value, 10) || 1;
+                                      setEditExpiryDays(d);
+                                      setEditExpiryDate(calculateDateFromDays(d, simulatedNow));
+                                    }}
+                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 font-mono focus:border-amber-400 focus:outline-none"
+                                  />
+                                </div>
+
+                                <div>
+                                  <label className="text-amber-300 text-[11px] block mb-0.5">Exact Expiration Date</label>
+                                  <input
+                                    type="date"
+                                    value={editExpiryDate}
+                                    min={new Date(simulatedNow).toISOString().split('T')[0]}
+                                    onChange={(e) => {
+                                      setEditExpiryDate(e.target.value);
+                                      if (e.target.value) {
+                                        setEditExpiryDays(calculateDaysFromDate(e.target.value, simulatedNow));
+                                      }
+                                    }}
+                                    className="w-full bg-slate-950 border border-amber-500/50 rounded-lg px-2.5 py-1.5 text-xs text-amber-200 font-mono focus:border-amber-400 focus:outline-none [color-scheme:dark] cursor-pointer"
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-between pt-1 flex-wrap gap-2">
+                                <div className="flex items-center space-x-1.5 text-[10px]">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const newD = editExpiryDays + 3;
+                                      setEditExpiryDays(newD);
+                                      setEditExpiryDate(calculateDateFromDays(newD, simulatedNow));
+                                    }}
+                                    className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
+                                  >
+                                    +3d Freezer
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const newD = editExpiryDays + 7;
+                                      setEditExpiryDays(newD);
+                                      setEditExpiryDate(calculateDateFromDays(newD, simulatedNow));
+                                    }}
+                                    className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
+                                  >
+                                    +7d Extend
+                                  </button>
+                                </div>
+
+                                <div className="flex items-center space-x-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingExpiryDocId(null)}
+                                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs cursor-pointer"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isSavingExpiry}
+                                    onClick={() => handleSaveCardExpiry(doc._id)}
+                                    className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-950 cursor-pointer disabled:opacity-50"
+                                  >
+                                    {isSavingExpiry ? 'Saving...' : 'Save Date'}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>

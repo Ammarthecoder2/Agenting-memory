@@ -11,6 +11,7 @@ import dotenv from 'dotenv';
 import { globalMongoMemory } from './src/memory/mongo_engine';
 import { agentService } from './src/services/agent_service';
 import { ChangeStreamEvent } from './src/types/memory';
+import { estimateFoodShelfLife, searchFoodSuggestions, FOOD_EXPIRY_KNOWLEDGE_BASE } from './src/data/foodExpiryKnowledge';
 
 dotenv.config();
 
@@ -114,6 +115,7 @@ async function startServer() {
       quantity = '1 portion',
       category = 'produce',
       shelfLifeDays = 7,
+      expirationDate,
       dietaryTags = [],
       userId = 'user_demo_1',
       workspaceId = 'home_fridge',
@@ -126,7 +128,20 @@ async function startServer() {
     }
 
     const now = globalMongoMemory.getSimulatedNow();
-    const expiresDate = new Date(now.getTime() + Number(shelfLifeDays) * 24 * 3600 * 1000);
+    let expiresDate: Date;
+    let computedDays = Number(shelfLifeDays) || 7;
+
+    if (expirationDate) {
+      const parsed = new Date(expirationDate);
+      if (!isNaN(parsed.getTime())) {
+        expiresDate = parsed;
+        computedDays = Math.max(1, Math.ceil((parsed.getTime() - now.getTime()) / (24 * 3600 * 1000)));
+      } else {
+        expiresDate = new Date(now.getTime() + computedDays * 24 * 3600 * 1000);
+      }
+    } else {
+      expiresDate = new Date(now.getTime() + computedDays * 24 * 3600 * 1000);
+    }
 
     const doc = globalMongoMemory.insertOne({
       owner: { userId, userName, workspaceId },
@@ -136,7 +151,7 @@ async function startServer() {
         item_name: itemName.trim(),
         quantity: quantity.trim() || '1 portion',
         category,
-        shelf_life_days: Number(shelfLifeDays),
+        shelf_life_days: computedDays,
         dietary_tags: dietaryTags,
         is_perishable: true,
         notes: 'Added manually via item entry form'
@@ -155,6 +170,71 @@ async function startServer() {
     });
 
     res.json({ success: true, item: doc });
+  });
+
+  // API Route: Update Expiration Date / Shelf Life Days of an Item
+  app.patch('/api/memories/item/:id/expiry', (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { shelfLifeDays, expirationDate } = req.body;
+    const now = globalMongoMemory.getSimulatedNow();
+    let expiresDate: Date;
+    let days: number;
+
+    if (expirationDate) {
+      expiresDate = new Date(expirationDate);
+      days = Math.max(1, Math.ceil((expiresDate.getTime() - now.getTime()) / (24 * 3600 * 1000)));
+    } else {
+      days = Number(shelfLifeDays) || 7;
+      expiresDate = new Date(now.getTime() + days * 24 * 3600 * 1000);
+    }
+
+    const updated = globalMongoMemory.updateOne(id, {
+      lifecycleUpdate: {
+        ttl_index_expires_at: expiresDate.toISOString()
+      },
+      contentUpdate: {
+        shelf_life_days: days
+      }
+    }, `User updated expiration date to ${expiresDate.toISOString()}`);
+
+    if (!updated) {
+      res.status(404).json({ error: 'Item not found' });
+      return;
+    }
+    res.json({ success: true, item: updated });
+  });
+
+  // API Route: Auto-estimate food shelf life from memorized USDA knowledge
+  app.get('/api/food/estimate', (req: Request, res: Response) => {
+    const query = (req.query.query as string) || '';
+    const estimate = estimateFoodShelfLife(query);
+    const now = globalMongoMemory.getSimulatedNow();
+    const expiresDate = new Date(now.getTime() + estimate.shelfLifeDays * 24 * 3600 * 1000);
+    res.json({
+      success: true,
+      query,
+      estimate,
+      simulatedNow: now.toISOString(),
+      expiresDate: expiresDate.toISOString(),
+      formattedExpiry: expiresDate.toLocaleDateString()
+    });
+  });
+
+  // API Route: Search food suggestions for instant autocomplete
+  app.get('/api/food/suggestions', (req: Request, res: Response) => {
+    const query = (req.query.query as string) || '';
+    const limit = req.query.limit ? Number(req.query.limit) : 8;
+    const suggestions = searchFoodSuggestions(query, limit);
+    res.json({ success: true, count: suggestions.length, suggestions });
+  });
+
+  // API Route: Entire memorized food catalog
+  app.get('/api/food/catalog', (_req: Request, res: Response) => {
+    res.json({
+      success: true,
+      totalCount: FOOD_EXPIRY_KNOWLEDGE_BASE.length,
+      catalog: FOOD_EXPIRY_KNOWLEDGE_BASE
+    });
   });
 
   // API Route: Discard or Mark Item Thrown Out / Consumed

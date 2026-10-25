@@ -12,7 +12,8 @@ import {
   ShieldCheck, 
   Archive, 
   Bell,
-  Sparkles
+  Sparkles,
+  Calendar
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -115,6 +116,30 @@ export const Header: React.FC<HeaderProps> = ({
             >
               +8d (Expire)
             </button>
+
+            {/* Small option to pick date directly beside days option */}
+            <div className="hidden md:flex items-center space-x-1 pl-1 border-l border-slate-800 text-[11px]">
+              <label 
+                className="flex items-center space-x-1.5 px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-850 border border-slate-750 text-slate-300 cursor-pointer transition-all"
+                title="Pick exact target date to advance clock to"
+              >
+                <Calendar className="w-3 h-3 text-amber-400" />
+                <span className="text-[10px] text-amber-300/90 font-medium">Date:</span>
+                <input
+                  type="date"
+                  min={new Date(simulatedNow).toISOString().split('T')[0]}
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      const target = new Date(e.target.value).getTime();
+                      const now = new Date(simulatedNow).getTime();
+                      const days = Math.ceil((target - now) / (24 * 3600 * 1000));
+                      if (days > 0) onAdvanceDays(days);
+                    }
+                  }}
+                  className="bg-transparent text-[11px] font-mono text-amber-200 outline-none cursor-pointer [color-scheme:dark] w-24"
+                />
+              </label>
+            </div>
           </div>
         </div>
 
